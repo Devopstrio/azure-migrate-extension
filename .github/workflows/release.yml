@@ -1,0 +1,62 @@
+name: 'Azure Migrate Extension CD'
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/**'
+      - 'backend/**'
+      - 'waves/**'
+      - '.github/workflows/release.yml'
+
+jobs:
+  validate-and-test:
+    name: 'Migration Logic Validation'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Source
+      uses: actions/checkout@v3
+
+    - name: Run Pytest
+      run: |
+        pip install pytest fastapi httpx
+        pytest tests/
+
+  build-and-push:
+    name: 'Modernization Platform Release'
+    needs: validate-and-test
+    runs-on: ubuntu-latest
+    steps:
+    - name: Azure CLI Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Build & Push Migrate API
+      run: |
+        az acr login --name acrmigrate
+        docker build -t acrmigrate.azurecr.io/devopstrio/azure-migrate-api:${{ github.sha }} ./backend
+        docker push acrmigrate.azurecr.io/devopstrio/azure-migrate-api:${{ github.sha }}
+
+    - name: Build & Push Assessment Engine
+      run: |
+        docker build -t acrmigrate.azurecr.io/devopstrio/assessment-engine:${{ github.sha }} ./apps/assessment-engine
+        docker push acrmigrate.azurecr.io/devopstrio/assessment-engine:${{ github.sha }}
+
+  aks-rollout:
+    name: 'Deployment to AKS'
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+    - name: AKS Set Context
+      uses: azure/aks-set-context@v3
+      with:
+        resource-group: 'rg-azure-migrate-ext-prd'
+        cluster-name: 'aks-migrate-factory-prd'
+
+    - name: Helm Upgrade
+      run: |
+        helm upgrade --install migrate-extension ./helm/azure-migrate-extension \
+        --namespace migrate-factory-prod --create-namespace \
+        --set api.image.tag=${{ github.sha }}
